@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="あさしたく">
+<title>あさの したく 🌅</title>
+<link rel="manifest" href="manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;500;700&family=M+PLUS+Rounded+1c:wght@400;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#FFF5EA;overscroll-behavior:none;-webkit-tap-highlight-color:transparent}
+@keyframes pulse-mic{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.12);opacity:.7}}
+@keyframes blink-over{0%,100%{opacity:1}50%{opacity:.45}}
+@keyframes pop-in{0%{transform:scale(.92);opacity:0}100%{transform:scale(1);opacity:1}}
+@keyframes float-up{0%{transform:translateY(8px);opacity:0}100%{transform:translateY(0);opacity:1}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useRef, useEffect, useCallback } = React;
+const { createRoot } = ReactDOM;
+
+const STORAGE_KEY = "morning-routine-config";
+const DEFAULT_TASKS = [
+  { id: 1, name: "歯を磨く", minutes: 10 },
+  { id: 2, name: "顔を洗う", minutes: 5 },
+  { id: 3, name: "着替える", minutes: 10 },
+  { id: 4, name: "朝ごはん", minutes: 20 },
+  { id: 5, name: "お薬を飲む", minutes: 2 },
+];
+
+function fmt(totalSec) {
+  const sign = totalSec < 0 ? "+" : "";
+  const s = Math.abs(Math.round(totalSec));
+  const m = Math.floor(s / 60), ss = s % 60;
+  return sign + m + ":" + String(ss).padStart(2, "0");
+}
+function clock(d) {
+  if (!d) return "--:--";
+  return d.getHours() + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+function iconBtn(disabled) {
+  return {
+    width:26, height:22, border:"none", borderRadius:8,
+    background: disabled ? "transparent" : "#FFF1E8",
+    color: disabled ? "#E8D5C5" : "#E5703B",
+    cursor: disabled ? "default" : "pointer",
+    display:"flex", alignItems:"center", justifyContent:"center", padding:0, fontSize:14
+  };
+}
+
+function MorningRoutine() {
+  const [screen, setScreen] = useState("setup");
+  const [tasks, setTasks] = useState(DEFAULT_TASKS);
+  const [targetTime, setTargetTime] = useState("08:30");
+  const [targetEnabled, setTargetEnabled] = useState(true);
+
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [remainings, setRemainings] = useState([]);
+  const [now, setNow] = useState(new Date());
+  const [startedAt, setStartedAt] = useState(null);
+  const [finishedAt, setFinishedAt] = useState(null);
+  const [alarmFired, setAlarmFired] = useState(false);
+
+  const [micOn, setMicOn] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [heard, setHeard] = useState("");
+  const [aiReply, setAiReply] = useState("");
+  const [thinking, setThinking] = useState(false);
+  const [srSupported, setSrSupported] = useState(true);
+  const [micNote, setMicNote] = useState("");
+  const [textInput, setTextInput] = useState("");
+
+  const recognitionRef = useRef(null);
+  const micOnRef = useRef(false);
+  const speakingRef = useRef(false);
+  const screenRef = useRef("setup");
+  const tasksRef = useRef(tasks);
+  const currentIndexRef = useRef(0);
+  const remainingsRef = useRef([]);
+  const nowRef = useRef(new Date());
+  const cmdRef = useRef(function(){});
+
+  useEffect(function(){ screenRef.current = screen; }, [screen]);
+  useEffect(function(){ tasksRef.current = tasks; }, [tasks]);
+  useEffect(function(){ currentIndexRef.current = currentIndex; }, [currentIndex]);
+  useEffect(function(){ remainingsRef.current = remainings; }, [remainings]);
+  useEffect(function(){ nowRef.current = now; }, [now]);
+
+  // 設定の読み込み（localStorage）
+  useEffect(function() {
+    try {
+      var saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        var cfg = JSON.parse(saved);
+        if (Array.isArray(cfg.tasks) && cfg.tasks.length) setTasks(cfg.tasks);
+        if (cfg.targetTime) setTargetTime(cfg.targetTime);
+        if (typeof cfg.targetEnabled === "boolean") setTargetEnabled(cfg.targetEnabled);
+      }
+    } catch(e) {}
+  }, []);
+
+  var saveConfig = useCallback(function(t, tt, te) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: t, targetTime: tt, targetEnabled: te }));
+    } catch(e) {}
+  }, []);
+
+  // 音声認識の初期化
+  useEffect(function() {
+    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { setSrSupported(false); return; }
+    var rec = new SR();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = "ja-JP";
+    rec.onstart = function() { setListening(true); };
+    rec.onresult = function(event) {
+      var finalText = "", interim = "";
+      for (var i = event.resultIndex; i < event.results.length; i++) {
+        var r = event.results[i];
+        if (r.isFinal) finalText += r[0].transcript;
+        else interim += r[0].transcript;
+      }
+      if (interim) setHeard(interim);
+      if (finalText) {
+        setHeard(finalText);
+        if (!speakingRef.current) cmdRef.current(finalText);
+      }
+    };
+    rec.onerror = function(e) {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        micOnRef.current = false; setMicOn(false);
+        setMicNote("マイクの許可が必要だよ。ブラウザの設定をオンにしてね");
+      }
+    };
+    rec.onend = function() {
+      setListening(false);
+      if (micOnRef.current && !speakingRef.current) {
+        try { rec.start(); } catch(e) {}
+      }
+    };
+    recognitionRef.current = rec;
+    return function() { try { rec.stop(); } catch(e) {} };
+  }, []);
+
+  var speak = useCallback(function(text) {
+    if (!("speechSynthesis" in window)) return;
+    try { window.speechSynthesis.cancel(); } catch(e) {}
+    speakingRef.current = true; setSpeaking(true);
+    try { if (recognitionRef.current) recognitionRef.current.stop(); } catch(e) {}
+    var u = new SpeechSynthesisUtterance(text);
+    u.lang = "ja-JP"; u.rate = 1.0; u.pitch = 1.05;
+    var done = function() {
+      speakingRef.current = false; setSpeaking(false);
+      if (micOnRef.current) {
+        setTimeout(function() {
+          try { if (recognitionRef.current) recognitionRef.current.start(); } catch(e) {}
+        }, 250);
+      }
+    };
+    u.onend = done; u.onerror = done;
+    window.speechSynthesis.speak(u);
+  }, []);
+
+  var beep = useCallback(function() {
+    try {
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      var ctx = new Ctx();
+      var o = ctx.createOscillator(), g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.type = "sine"; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.0001, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
+      o.start(); o.stop(ctx.currentTime + 0.5);
+    } catch(e) {}
+  }, []);
+
+  var calcEstimate = useCallback(function(baseNow, idx, rems) {
+    var sec = 0;
+    for (var i = idx; i < rems.length; i++) sec += Math.max(rems[i] || 0, 0);
+    return new Date(baseNow.getTime() + sec * 1000);
+  }, []);
+
+  var plannedFinish = useCallback(function() {
+    if (!startedAt) return null;
+    var total = tasks.reduce(function(a, t) { return a + t.minutes * 60; }, 0);
+    return new Date(startedAt.getTime() + total * 1000);
+  }, [startedAt, tasks]);
+
+  var startMic = useCallback(function() {
+    if (!recognitionRef.current) return;
+    micOnRef.current = true; setMicOn(true); setMicNote("");
+    try { recognitionRef.current.start(); } catch(e) {}
+  }, []);
+
+  var stopMic = useCallback(function() {
+    micOnRef.current = false; setMicOn(false);
+    try { if (recognitionRef.current) recognitionRef.current.stop(); } catch(e) {}
+  }, []);
+
+  var toggleMic = useCallback(function() {
+    if (micOnRef.current) stopMic(); else startMic();
+  }, [startMic, stopMic]);
+
+  var completeTask = useCallback(function() {
+    var idx = currentIndexRef.current, tks = tasksRef.current;
+    if (idx + 1 < tks.length) {
+      var next = idx + 1;
+      setCurrentIndex(next);
+      setAlarmFired((remainingsRef.current[next] || 0) <= 0);
+      speak("つぎは、" + tks[next].name + "だよ");
+    } else {
+      setFinishedAt(new Date());
+      setScreen("done");
+      micOnRef.current = false; setMicOn(false);
+      try { if (recognitionRef.current) recognitionRef.current.stop(); } catch(e) {}
+      speak("ぜんぶ おわったよ。よくがんばったね");
+    }
+  }, [speak]);
+
+  var goBack = useCallback(function() {
+    var idx = currentIndexRef.current;
+    if (idx > 0) {
+      var prev = idx - 1;
+      setCurrentIndex(prev);
+      setAlarmFired((remainingsRef.current[prev] || 0) <= 0);
+      speak(tasksRef.current[prev].name + "に もどったよ");
+    }
+  }, [speak]);
+
+  var askAI = useCallback(async function(question) {
+    setThinking(true); setAiReply("");
+    var d = nowRef.current, tks = tasksRef.current, idx = currentIndexRef.current;
+    var est = calcEstimate(d, idx, remainingsRef.current);
+    var ctx = "現在時刻: " + clock(d) + " / 今やっているタスク: " + (tks[idx] ? tks[idx].name : "なし") + " / 残りタスク数: " + (tks.length - idx - 1) + " / 予想完了時刻: " + clock(est);
+    try {
+      var response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514", max_tokens: 1000,
+          messages: [{ role: "user", content: "あなたは「くろぴ」という名前の、朝のしたくを手伝う優しいアシスタントです。しのちゃんに向けて、短く（1〜2文）あたたかい話し言葉の日本語で答えてください。\n\n[いまの状況]\n" + ctx + "\n\n[しのちゃんの質問]\n" + question }]
+        }),
+      });
+      var data = await response.json();
+      var text = (data.content || []).filter(function(c){ return c.type === "text"; }).map(function(c){ return c.text; }).join("").trim();
+      var reply = text || "うまく答えられなかったよ";
+      setAiReply(reply); speak(reply);
+    } catch(e) {
+      var reply = "ネットがつながらないみたい";
+      setAiReply(reply); speak(reply);
+    }
+    setThinking(false);
+  }, [calcEstimate, speak]);
+
+  var handleCommand = useCallback(function(raw) {
+    var t = raw.replace(/\s/g, "");
+    if (!t) return;
+    if (screenRef.current === "running" && /(もどる|戻る|まちがえ|間違え|ひとつ前|一つ前)/.test(t)) { goBack(); return; }
+    if (screenRef.current === "running" && /(完了|終わった|おわった|できた|オッケー|オーケー|次|つぎ)/.test(t)) { completeTask(); return; }
+    if (/(今何時|いま何時|何時|なんじ|時刻)/.test(t)) {
+      var d = nowRef.current;
+      speak("いまは " + d.getHours() + "時 " + d.getMinutes() + "分 だよ"); return;
+    }
+    if (/(完了時間|終わる時間|終わり|目安|予想|何時に終わ)/.test(t)) {
+      var est = calcEstimate(nowRef.current, currentIndexRef.current, remainingsRef.current);
+      speak("いまのペースだと " + est.getHours() + "時 " + est.getMinutes() + "分 くらいに終わりそうだよ"); return;
+    }
+    if (/(くろぴ|クロピ)/.test(t)) { askAI(raw); return; }
+  }, [completeTask, goBack, speak, calcEstimate, askAI]);
+
+  useEffect(function() { cmdRef.current = handleCommand; }, [handleCommand]);
+
+  // タイマー
+  useEffect(function() {
+    if (screen !== "running") return;
+    var id = setInterval(function() {
+      setNow(new Date());
+      setRemainings(function(prev) {
+        return prev.map(function(v, i) {
+          return i === currentIndexRef.current ? v - 1 : v;
+        });
+      });
+    }, 1000);
+    return function() { clearInterval(id); };
+  }, [screen]);
+
+  // 0秒アラーム
+  useEffect(function() {
+    if (screen !== "running") return;
+    var rem = remainings[currentIndex];
+    if (rem === 0 && !alarmFired) {
+      setAlarmFired(true);
+      beep();
+      var name = tasks[currentIndex] ? tasks[currentIndex].name : "";
+      setTimeout(function() {
+        speak(name + "の じかんに なったよ。おわったら 完了って おしえてね");
+      }, 550);
+    }
+  }, [remainings, currentIndex, screen, alarmFired, beep, speak, tasks]);
+
+  var startRoutine = useCallback(function() {
+    if (!tasks.length) return;
+    saveConfig(tasks, targetTime, targetEnabled);
+    setStartedAt(new Date()); setFinishedAt(null);
+    setCurrentIndex(0);
+    setRemainings(tasks.map(function(t) { return t.minutes * 60; }));
+    setAlarmFired(false); setNow(new Date());
+    setScreen("running");
+    micOnRef.current = true; setMicOn(true);
+    if (recognitionRef.current) { try { recognitionRef.current.start(); } catch(e) {} }
+    setTimeout(function() { speak("おはよう。さいしょは " + tasks[0].name + " だよ"); }, 700);
+  }, [tasks, targetTime, targetEnabled, saveConfig, speak]);
+
+  var resetToSetup = useCallback(function() {
+    micOnRef.current = false; setMicOn(false);
+    try { if (recognitionRef.current) recognitionRef.current.stop(); } catch(e) {}
+    try { window.speechSynthesis.cancel(); } catch(e) {}
+    setScreen("setup"); setHeard(""); setAiReply("");
+  }, []);
+
+  var addTask = function() { setTasks(function(p) { return [...p, { id: Date.now(), name: "あたらしいタスク", minutes: 5 }]; }); };
+  var removeTask = function(id) { setTasks(function(p) { return p.filter(function(t) { return t.id !== id; }); }); };
+  var updateTask = function(id, field, val) { setTasks(function(p) { return p.map(function(t) { return t.id === id ? Object.assign({}, t, {[field]: val}) : t; }); }); };
+  var moveTask = function(i, dir) {
+    setTasks(function(p) {
+      var j = i + dir; if (j < 0 || j >= p.length) return p;
+      var a = [...p]; var tmp = a[i]; a[i] = a[j]; a[j] = tmp; return a;
+    });
+  };
+  var submitText = function() {
+    var v = textInput.trim(); if (!v) return;
+    setHeard(v); handleCommand(v); setTextInput("");
+  };
+
+  // 表示計算
+  var task = tasks[currentIndex];
+  var remaining = remainings[currentIndex] !== undefined ? remainings[currentIndex] : 0;
+  var totalForTask = task ? task.minutes * 60 : 1;
+  var progress = remaining > 0 ? Math.min(remaining / totalForTask, 1) : 0;
+  var isOver = remaining < 0;
+  var estimate = startedAt ? calcEstimate(now, currentIndex, remainings) : null;
+  var planned = plannedFinish();
+  var onTime = null;
+  if (targetEnabled && estimate) {
+    var parts = targetTime.split(":").map(Number);
+    var tgt = new Date(now); tgt.setHours(parts[0], parts[1], 0, 0);
+    onTime = estimate <= tgt;
+  }
+  var R = 120, C = 2 * Math.PI * 120;
+  var dashOffset = C * (1 - progress);
+
+  // ====== セットアップ画面 ======
+  if (screen === "setup") {
+    return (
+      <div style={{minHeight:"100vh",width:"100%",background:"linear-gradient(170deg,#FFE9D6 0%,#FFF5EA 45%,#FDF1E3 100%)",fontFamily:"'Zen Maru Gothic',sans-serif",color:"#4A3B32",padding:"24px 16px 40px",display:"flex",justifyContent:"center"}}>
+        <div style={{width:"100%",maxWidth:440}}>
+          <div style={{textAlign:"center",marginBottom:22}}>
+            <div style={{fontSize:34,marginBottom:4}}>🌅</div>
+            <h1 style={{fontSize:26,fontWeight:700,margin:0,letterSpacing:".02em"}}>あさの したく</h1>
+            <p style={{fontSize:13,opacity:.6,margin:"6px 0 0"}}>じゅんばんと じかんを きめてね</p>
+          </div>
+          <div style={{background:"#fff",borderRadius:22,padding:"16px 18px",marginBottom:18,boxShadow:"0 6px 22px rgba(214,140,90,.14)"}}>
+            <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",marginBottom:targetEnabled?12:0}}>
+              <input type="checkbox" checked={targetEnabled} onChange={function(e){setTargetEnabled(e.target.checked);}} style={{width:20,height:20,accentColor:"#FF8A65"}} />
+              <span style={{fontWeight:700,fontSize:15}}>🎯 目標の完了時間をきめる</span>
+            </label>
+            {targetEnabled && (
+              <div style={{display:"flex",alignItems:"center",gap:12}}>
+                <span style={{fontSize:13,opacity:.65}}>この時間までに おわらせたい</span>
+                <input type="time" value={targetTime} onChange={function(e){setTargetTime(e.target.value);}} style={{fontFamily:"'M PLUS Rounded 1c',sans-serif",fontSize:22,fontWeight:700,border:"2px solid #FFD9C2",borderRadius:12,padding:"4px 10px",color:"#E5703B",background:"#FFF8F2"}} />
+              </div>
+            )}
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {tasks.map(function(t, i) {
+              return (
+                <div key={t.id} style={{background:"#fff",borderRadius:18,padding:"12px 12px 12px 14px",boxShadow:"0 4px 14px rgba(214,140,90,.10)",display:"flex",alignItems:"center",gap:8}}>
+                  <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                    <button onClick={function(){moveTask(i,-1);}} disabled={i===0} style={iconBtn(i===0)}>↑</button>
+                    <button onClick={function(){moveTask(i,1);}} disabled={i===tasks.length-1} style={iconBtn(i===tasks.length-1)}>↓</button>
+                  </div>
+                  <div style={{width:26,height:26,borderRadius:"50%",background:"#FFEEE2",color:"#E5703B",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,fontSize:13,fontFamily:"'M PLUS Rounded 1c',sans-serif",flexShrink:0}}>{i+1}</div>
+                  <input value={t.name} onChange={function(e){updateTask(t.id,"name",e.target.value);}} style={{flex:1,minWidth:0,border:"none",borderBottom:"2px solid #F3E2D4",background:"transparent",fontSize:16,fontWeight:500,fontFamily:"'Zen Maru Gothic',sans-serif",color:"#4A3B32",padding:"4px 2px",outline:"none"}} />
+                  <div style={{display:"flex",alignItems:"center",gap:3,flexShrink:0}}>
+                    <input type="number" min={0} value={t.minutes} onChange={function(e){updateTask(t.id,"minutes",Math.max(0,parseInt(e.target.value)||0));}} style={{width:46,textAlign:"center",border:"2px solid #FFD9C2",borderRadius:10,fontFamily:"'M PLUS Rounded 1c',sans-serif",fontWeight:700,fontSize:16,color:"#E5703B",padding:"4px 0",background:"#FFF8F2"}} />
+                    <span style={{fontSize:12,opacity:.6}}>分</span>
+                  </div>
+                  <button onClick={function(){removeTask(t.id);}} style={Object.assign({},iconBtn(false),{color:"#D98B7A"})}>🗑</button>
+                </div>
+              );
+            })}
+          </div>
+          <button onClick={addTask} style={{marginTop:14,width:"100%",padding:"12px",borderRadius:16,border:"2px dashed #FFC9AE",background:"transparent",color:"#E5703B",fontWeight:700,fontSize:15,cursor:"pointer",fontFamily:"'Zen Maru Gothic',sans-serif",display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>＋ タスクを ついか</button>
+          {!srSupported && <p style={{fontSize:12,color:"#C77",textAlign:"center",marginTop:14,lineHeight:1.6}}>⚠️ 音声入力は このブラウザでは 使えないみたい</p>}
+          <button onClick={startRoutine} disabled={!tasks.length} style={{marginTop:24,width:"100%",padding:"18px",borderRadius:22,border:"none",background:"linear-gradient(135deg,#FF9A6B,#FF7A50)",color:"#fff",fontWeight:800,fontSize:20,cursor:"pointer",fontFamily:"'Zen Maru Gothic',sans-serif",boxShadow:"0 8px 24px rgba(255,122,80,.42)",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>▶ スタート</button>
+          <p style={{fontSize:11,opacity:.45,textAlign:"center",marginTop:14,lineHeight:1.7}}>※ 画面を つけっぱなしに してね<br/>「完了」「もどる」など 声でも すすめられるよ</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ====== 完了画面 ======
+  if (screen === "done") {
+    var took = startedAt && finishedAt ? Math.round((finishedAt - startedAt) / 60000) : null;
+    var madeIt = null;
+    if (targetEnabled && finishedAt) {
+      var fp = targetTime.split(":").map(Number);
+      var tgtD = new Date(finishedAt); tgtD.setHours(fp[0], fp[1], 0, 0);
+      madeIt = finishedAt <= tgtD;
+    }
+    return (
+      <div style={{minHeight:"100vh",width:"100%",background:"linear-gradient(170deg,#E9F6EC 0%,#FFF5EA 60%,#FDF1E3 100%)",fontFamily:"'Zen Maru Gothic',sans-serif",color:"#4A3B32",padding:24,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
+        <div style={{textAlign:"center",animation:"pop-in .5s ease both"}}>
+          <div style={{fontSize:64,marginBottom:10}}>🎉</div>
+          <h1 style={{fontSize:28,fontWeight:700,margin:"0 0 8px"}}>ぜんぶ できたね！</h1>
+          <p style={{fontSize:15,opacity:.7,margin:0}}>よく がんばりました ☺️</p>
+          <div style={{marginTop:26,background:"#fff",borderRadius:22,padding:"20px 28px",boxShadow:"0 6px 22px rgba(120,180,140,.18)",display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",gap:28}}><span style={{opacity:.6,fontSize:14}}>はじめた時間</span><strong style={{fontFamily:"'M PLUS Rounded 1c',sans-serif",fontSize:18}}>{clock(startedAt)}</strong></div>
+            <div style={{display:"flex",justifyContent:"space-between",gap:28}}><span style={{opacity:.6,fontSize:14}}>おわった時間</span><strong style={{fontFamily:"'M PLUS Rounded 1c',sans-serif",fontSize:18}}>{clock(finishedAt)}</strong></div>
+            {took != null && <div style={{display:"flex",justifyContent:"space-between",gap:28}}><span style={{opacity:.6,fontSize:14}}>かかった時間</span><strong style={{fontFamily:"'M PLUS Rounded 1c',sans-serif",fontSize:18}}>{took}分</strong></div>}
+            {madeIt != null && <div style={{marginTop:4,padding:"8px 12px",borderRadius:12,fontWeight:700,fontSize:15,background:madeIt?"#E4F5E8":"#FDEAE4",color:madeIt?"#3F9B5E":"#D9603F"}}>{madeIt?"🎯 目標に間に合ったよ！":"目標は すぎちゃったけど おつかれさま"}</div>}
+          </div>
+          <button onClick={resetToSetup} style={{marginTop:26,padding:"14px 30px",borderRadius:18,border:"none",background:"linear-gradient(135deg,#FF9A6B,#FF7A50)",color:"#fff",fontWeight:800,fontSize:16,cursor:"pointer",fontFamily:"'Zen Maru Gothic',sans-serif",boxShadow:"0 6px 18px rgba(255,122,80,.4)",display:"flex",alignItems:"center",justifyContent:"center",gap:8,margin:"26px auto 0"}}>🔄 設定に もどる</button>
+        </div>
+      </div>
+    );
+  }
+
+  // ====== 実行画面 ======
+  return (
+    <div style={{minHeight:"100vh",width:"100%",background:isOver?"linear-gradient(170deg,#FFE3DC 0%,#FFF1EA 60%,#FDF1E3 100%)":"linear-gradient(170deg,#FFE9D6 0%,#FFF5EA 50%,#FDF1E3 100%)",fontFamily:"'Zen Maru Gothic',sans-serif",color:"#4A3B32",padding:"18px 16px 28px",display:"flex",flexDirection:"column",alignItems:"center",transition:"background .6s ease"}}>
+      <div style={{width:"100%",maxWidth:440,display:"flex",flexDirection:"column",flex:1}}>
+        <div style={{display:"flex",gap:8,marginBottom:12}}>
+          {[
+            {label:"いま",val:clock(now),color:"#4A3B32",bg:"#fff"},
+            ...(targetEnabled ? [{label:"目標",val:targetTime,color:"#7A6A5E",bg:"#fff"}] : []),
+            {label:"予想完了",val:clock(estimate),color:onTime===null?"#4A3B32":onTime?"#3F9B5E":"#D9603F",bg:onTime===null?"#fff":onTime?"#EAF7EE":"#FDEAE4"}
+          ].map(function(c, i) {
+            return (
+              <div key={i} style={{flex:1,background:c.bg,borderRadius:16,padding:"9px 6px",textAlign:"center",boxShadow:"0 3px 12px rgba(214,140,90,.10)"}}>
+                <div style={{fontSize:11,opacity:.55,marginBottom:2}}>{c.label}</div>
+                <div style={{fontFamily:"'M PLUS Rounded 1c',sans-serif",fontWeight:800,fontSize:20,color:c.color}}>{c.val}</div>
+              </div>
+            );
+          })}
+        </div>
+        {planned && <div style={{textAlign:"center",fontSize:11,opacity:.5,marginBottom:10}}>（当初の予定：{clock(planned)} 完了）</div>}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,marginBottom:6}}>
+          {tasks.map(function(_, i) {
+            return <div key={i} style={{width:i===currentIndex?22:8,height:8,borderRadius:8,background:i<currentIndex?"#7BC79A":i===currentIndex?"#FF7A50":"#F1DCCB",transition:"all .3s ease"}} />;
+          })}
+        </div>
+        <div style={{textAlign:"center",fontSize:12,opacity:.55,marginBottom:6,fontFamily:"'M PLUS Rounded 1c',sans-serif"}}>{currentIndex+1} / {tasks.length}</div>
+        <div key={currentIndex} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",animation:"float-up .4s ease both"}}>
+          <div style={{fontSize:13,opacity:.55,marginBottom:2}}>いまは</div>
+          <div style={{fontSize:28,fontWeight:700,marginBottom:14,textAlign:"center",padding:"0 8px"}}>{task ? task.name : ""}</div>
+          <div style={{position:"relative",width:280,height:280}}>
+            <svg width="280" height="280" style={{transform:"rotate(-90deg)"}}>
+              <circle cx="140" cy="140" r={R} fill="none" stroke="#F3E2D4" strokeWidth="16" />
+              <circle cx="140" cy="140" r={R} fill="none" stroke={isOver?"#E5544B":progress<0.25?"#F5933E":"#FF7A50"} strokeWidth="16" strokeLinecap="round" strokeDasharray={C} strokeDashoffset={isOver?0:dashOffset} style={{transition:"stroke-dashoffset .9s linear, stroke .4s"}} />
+            </svg>
+            <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
+              {isOver && <div style={{fontSize:13,color:"#E5544B",fontWeight:700,marginBottom:2,animation:"blink-over 1s infinite"}}>オーバー</div>}
+              <div style={{fontFamily:"'M PLUS Rounded 1c',sans-serif",fontWeight:800,fontSize:56,lineHeight:1,fontVariantNumeric:"tabular-nums",color:isOver?"#E5544B":"#4A3B32",animation:isOver?"blink-over 1s infinite":"none"}}>{fmt(remaining)}</div>
+              <div style={{fontSize:12,opacity:.5,marginTop:6}}>{currentIndex+1 < tasks.length ? "つぎ：" + tasks[currentIndex+1].name : "さいごの タスク"}</div>
+            </div>
+          </div>
+        </div>
+        {currentIndex > 0 && (
+          <button onClick={goBack} style={{width:"100%",padding:"11px",borderRadius:16,border:"2px solid #F0DBCA",background:"#FFFAF5",color:"#A8856E",fontWeight:700,fontSize:14,cursor:"pointer",fontFamily:"'Zen Maru Gothic',sans-serif",marginTop:8,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>↩ ひとつ前に もどる</button>
+        )}
+        <button onClick={completeTask} style={{width:"100%",padding:"20px",borderRadius:24,border:"none",marginTop:10,background:"linear-gradient(135deg,#7BC79A,#4FAE7A)",color:"#fff",fontWeight:800,fontSize:22,cursor:"pointer",fontFamily:"'Zen Maru Gothic',sans-serif",boxShadow:"0 8px 24px rgba(79,174,122,.38)",display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>✓ 完了！つぎへ</button>
+        <div style={{marginTop:14,background:"#fff",borderRadius:20,padding:"12px 14px",boxShadow:"0 4px 16px rgba(214,140,90,.12)"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <button onClick={toggleMic} disabled={!srSupported} style={{width:52,height:52,borderRadius:"50%",border:"none",flexShrink:0,background:micOn?"linear-gradient(135deg,#FF9A6B,#FF7A50)":"#F1DCCB",color:micOn?"#fff":"#A88C78",cursor:srSupported?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,animation:listening&&!speaking?"pulse-mic 1.4s infinite":"none",boxShadow:micOn?"0 4px 14px rgba(255,122,80,.4)":"none"}}>{micOn ? "🎙" : "🔇"}</button>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12,fontWeight:700,color:micOn?"#E5703B":"#A88C78"}}>{speaking?"🔊 くろぴが はなしてるよ":thinking?"くろぴが かんがえ中…":micOn?(listening?"🎙 きいてるよ…":"マイク オン"):"マイク オフ"}</div>
+              <div style={{fontSize:13,color:"#6B5B4E",marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{aiReply?"💬 "+aiReply:heard?"「"+heard+"」":"「完了」「今何時？」など 話しかけてね"}</div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8,marginTop:10}}>
+            <input value={textInput} onChange={function(e){setTextInput(e.target.value);}} onKeyDown={function(e){if(e.key==="Enter")submitText();}} placeholder="手入力でもOK（完了 / もどる / くろぴ〇〇？）" style={{flex:1,minWidth:0,border:"2px solid #F3E2D4",borderRadius:12,padding:"8px 12px",fontSize:14,fontFamily:"'Zen Maru Gothic',sans-serif",color:"#4A3B32",outline:"none",background:"#FFFAF5"}} />
+            <button onClick={submitText} style={{border:"none",borderRadius:12,padding:"8px 16px",background:"#FFE2D2",color:"#E5703B",fontWeight:700,fontSize:14,cursor:"pointer",fontFamily:"'Zen Maru Gothic',sans-serif",flexShrink:0}}>送信</button>
+          </div>
+          {micNote && <div style={{fontSize:11,color:"#C77",marginTop:8}}>{micNote}</div>}
+        </div>
+        <button onClick={resetToSetup} style={{marginTop:10,padding:"8px",border:"none",background:"transparent",color:"#A88C78",fontSize:12,cursor:"pointer",fontFamily:"'Zen Maru Gothic',sans-serif",display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>✏️ 設定に もどる（最初から）</button>
+      </div>
+    </div>
+  );
+}
+
+createRoot(document.getElementById("root")).render(<MorningRoutine />);
+</script>
+</body>
+</html>
