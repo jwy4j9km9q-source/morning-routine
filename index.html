@@ -146,7 +146,9 @@ function MorningRoutine() {
     rec.onend = function() {
       setListening(false);
       if (micOnRef.current && !speakingRef.current) {
-        try { rec.start(); } catch(e) {}
+        setTimeout(function() {
+          try { rec.start(); } catch(e) {}
+        }, 300);
       }
     };
     recognitionRef.current = rec;
@@ -201,7 +203,10 @@ function MorningRoutine() {
   var startMic = useCallback(function() {
     if (!recognitionRef.current) return;
     micOnRef.current = true; setMicOn(true); setMicNote("");
-    try { recognitionRef.current.start(); } catch(e) {}
+    try { recognitionRef.current.stop(); } catch(e) {}
+    setTimeout(function() {
+      try { recognitionRef.current.start(); } catch(e) {}
+    }, 200);
   }, []);
 
   var stopMic = useCallback(function() {
@@ -213,6 +218,30 @@ function MorningRoutine() {
     if (micOnRef.current) stopMic(); else startMic();
   }, [startMic, stopMic]);
 
+  // 画面が裏から戻ってきたらマイクを再起動
+  useEffect(function() {
+    var handleVisibility = function() {
+      if (document.visibilityState === "visible" && micOnRef.current && !speakingRef.current) {
+        setTimeout(function() {
+          try { if (recognitionRef.current) recognitionRef.current.stop(); } catch(e) {}
+          setTimeout(function() {
+            try { if (recognitionRef.current) recognitionRef.current.start(); } catch(e) {}
+          }, 400);
+        }, 500);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return function() { document.removeEventListener("visibilitychange", handleVisibility); };
+  }, []);
+
+  var restartMic = function() {
+    if (!micOnRef.current || !recognitionRef.current) return;
+    try { recognitionRef.current.stop(); } catch(e) {}
+    setTimeout(function() {
+      try { recognitionRef.current.start(); } catch(e) {}
+    }, 400);
+  };
+
   var completeTask = useCallback(function() {
     var idx = currentIndexRef.current, tks = tasksRef.current;
     if (idx + 1 < tks.length) {
@@ -220,6 +249,7 @@ function MorningRoutine() {
       setCurrentIndex(next);
       setAlarmFired((remainingsRef.current[next] || 0) <= 0);
       speak("つぎは、" + tks[next].name + "だよ");
+      setTimeout(restartMic, 1200);
     } else {
       setFinishedAt(new Date());
       setScreen("done");
@@ -236,6 +266,7 @@ function MorningRoutine() {
       setCurrentIndex(prev);
       setAlarmFired((remainingsRef.current[prev] || 0) <= 0);
       speak(tasksRef.current[prev].name + "に もどったよ");
+      setTimeout(restartMic, 1200);
     }
   }, [speak]);
 
