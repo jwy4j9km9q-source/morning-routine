@@ -336,6 +336,7 @@ const {
   createRoot
 } = ReactDOM;
 const STORAGE_KEY = "morning-routine-config";
+const TEMPLATES_KEY = "morning-routine-templates";
 const DEFAULT_TASKS = [{
   id: 1,
   name: "歯を磨く",
@@ -404,6 +405,8 @@ function MorningRoutine() {
   const [srSupported, setSrSupported] = useState(true);
   const [micNote, setMicNote] = useState("");
   const [textInput, setTextInput] = useState("");
+  const [templates, setTemplates] = useState([]);
+  const wakeLockRef = useRef(null);
   const recognitionRef = useRef(null);
   const micOnRef = useRef(false);
   const speakingRef = useRef(false);
@@ -441,6 +444,75 @@ function MorningRoutine() {
       }
     } catch (e) {}
   }, []);
+
+  // テンプレートの読み込み（localStorage）
+  useEffect(function () {
+    try {
+      var saved = localStorage.getItem(TEMPLATES_KEY);
+      if (saved) {
+        var list = JSON.parse(saved);
+        if (Array.isArray(list)) setTemplates(list);
+      }
+    } catch (e) {}
+  }, []);
+  var saveTemplatesToStorage = function (list) {
+    try {
+      localStorage.setItem(TEMPLATES_KEY, JSON.stringify(list));
+    } catch (e) {}
+  };
+  var saveCurrentAsTemplate = function () {
+    if (!tasks.length) return;
+    var name = window.prompt("テンプレートの名前をつけてね", "");
+    if (!name) return;
+    var tpl = {
+      id: Date.now(),
+      name: name,
+      tasks: tasks.map(function (t) {
+        return {
+          name: t.name,
+          minutes: t.minutes
+        };
+      })
+    };
+    setTemplates(function (prev) {
+      var next = [...prev, tpl];
+      saveTemplatesToStorage(next);
+      return next;
+    });
+  };
+  var loadTemplate = function (id) {
+    var tpl = templates.find(function (t) {
+      return t.id === id;
+    });
+    if (!tpl) return;
+    if (tasks.length && !window.confirm("いまの タスクを けして「" + tpl.name + "」を よみこむよ。いい？")) return;
+    setTasks(tpl.tasks.map(function (t, i) {
+      return {
+        id: Date.now() + i,
+        name: t.name,
+        minutes: t.minutes
+      };
+    }));
+  };
+  var deleteTemplate = function (id) {
+    var tpl = templates.find(function (t) {
+      return t.id === id;
+    });
+    if (!tpl) return;
+    if (!window.confirm("「" + tpl.name + "」を さくじょ するよ。いい？")) return;
+    setTemplates(function (prev) {
+      var next = prev.filter(function (t) {
+        return t.id !== id;
+      });
+      saveTemplatesToStorage(next);
+      return next;
+    });
+  };
+  var clearAllTasks = function () {
+    if (!tasks.length) return;
+    if (!window.confirm("ぜんぶの タスクを けすよ。いい？")) return;
+    setTasks([]);
+  };
   var saveConfig = useCallback(function (t, tt, te) {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -606,6 +678,39 @@ function MorningRoutine() {
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, []);
+
+  // 実行中は画面が自動で消えないようにする（Wake Lock）
+  var requestWakeLock = useCallback(async function () {
+    try {
+      if ("wakeLock" in navigator) {
+        wakeLockRef.current = await navigator.wakeLock.request("screen");
+      }
+    } catch (e) {}
+  }, []);
+  useEffect(function () {
+    if (screen === "running") {
+      requestWakeLock();
+    }
+    return function () {
+      if (wakeLockRef.current) {
+        try {
+          wakeLockRef.current.release();
+        } catch (e) {}
+        wakeLockRef.current = null;
+      }
+    };
+  }, [screen, requestWakeLock]);
+  useEffect(function () {
+    var handleWakeVisibility = function () {
+      if (document.visibilityState === "visible" && screenRef.current === "running" && !wakeLockRef.current) {
+        requestWakeLock();
+      }
+    };
+    document.addEventListener("visibilitychange", handleWakeVisibility);
+    return function () {
+      document.removeEventListener("visibilitychange", handleWakeVisibility);
+    };
+  }, [requestWakeLock]);
   var restartMic = function () {
     if (!micOnRef.current || !recognitionRef.current) return;
     try {
@@ -647,6 +752,39 @@ function MorningRoutine() {
       setTimeout(restartMic, 1200);
     }
   }, [speak]);
+  var postponeCurrentTask = useCallback(function () {
+    var idx = currentIndexRef.current,
+      tks = tasksRef.current,
+      rms = remainingsRef.current;
+    if (idx + 1 >= tks.length) return; // さいごのタスクは あとまわしできない
+    var movedTask = tks[idx],
+      movedRem = rms[idx];
+    var newTasks = [...tks.slice(0, idx), ...tks.slice(idx + 1), movedTask];
+    var newRems = [...rms.slice(0, idx), ...rms.slice(idx + 1), movedRem];
+    setTasks(newTasks);
+    setRemainings(newRems);
+    setAlarmFired((newRems[idx] || 0) <= 0);
+    speak(movedTask.name + "は あとで やろうね。つぎは " + newTasks[idx].name + " だよ");
+    setTimeout(restartMic, 1200);
+  }, [speak]);
+  var reorderUpcoming = useCallback(function (idx, dir) {
+    var j = idx + dir;
+    if (j <= currentIndexRef.current || j >= tasksRef.current.length) return;
+    setTasks(function (p) {
+      var a = [...p];
+      var tmp = a[idx];
+      a[idx] = a[j];
+      a[j] = tmp;
+      return a;
+    });
+    setRemainings(function (p) {
+      var a = [...p];
+      var tmp = a[idx];
+      a[idx] = a[j];
+      a[j] = tmp;
+      return a;
+    });
+  }, []);
   var askAI = useCallback(async function (question) {
     setThinking(true);
     setAiReply("");
@@ -715,6 +853,18 @@ function MorningRoutine() {
   useEffect(function () {
     cmdRef.current = handleCommand;
   }, [handleCommand]);
+
+  // セットアップ画面の「いま」を ときどき更新（予想終了時刻の表示用）
+  useEffect(function () {
+    if (screen !== "setup") return;
+    setNow(new Date());
+    var id = setInterval(function () {
+      setNow(new Date());
+    }, 30000);
+    return function () {
+      clearInterval(id);
+    };
+  }, [screen]);
 
   // タイマー
   useEffect(function () {
@@ -843,6 +993,11 @@ function MorningRoutine() {
   var R = 120,
     C = 2 * Math.PI * 120;
   var dashOffset = C * (1 - progress);
+  var setupTotalMinutes = tasks.reduce(function (a, t) {
+    return a + (t.minutes || 0);
+  }, 0);
+  var setupPredictedFinish = new Date(now.getTime() + setupTotalMinutes * 60000);
+  var setupCumMinutes = 0;
 
   // ====== セットアップ画面 ======
   if (screen === "setup") {
@@ -886,6 +1041,120 @@ function MorningRoutine() {
         margin: "6px 0 0"
       }
     }, "じゅんばんと じかんを きめてね")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: "#fff",
+        borderRadius: 22,
+        padding: "14px 16px",
+        marginBottom: 14,
+        boxShadow: "0 6px 22px rgba(214,140,90,.14)"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        marginBottom: templates.length ? 10 : 0
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontWeight: 700,
+        fontSize: 15
+      }
+    }, "📋 テンプレート"), /*#__PURE__*/React.createElement("button", {
+      onClick: saveCurrentAsTemplate,
+      style: {
+        border: "none",
+        background: "#FFE2D2",
+        color: "#E5703B",
+        borderRadius: 12,
+        padding: "7px 12px",
+        fontWeight: 700,
+        fontSize: 12,
+        cursor: "pointer",
+        fontFamily: "'Zen Maru Gothic',sans-serif",
+        whiteSpace: "nowrap"
+      }
+    }, "＋ 今のを保存")), templates.length > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 8
+      }
+    }, templates.map(function (tpl) {
+      return /*#__PURE__*/React.createElement("div", {
+        key: tpl.id,
+        style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          background: "#FFF8F2",
+          borderRadius: 14,
+          padding: "8px 10px"
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          flex: 1,
+          minWidth: 0
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 14,
+          fontWeight: 700,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis"
+        }
+      }, tpl.name), /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 11,
+          opacity: .55
+        }
+      }, tpl.tasks.length + "個・合計" + tpl.tasks.reduce(function (a, t) {
+        return a + t.minutes;
+      }, 0) + "分")), /*#__PURE__*/React.createElement("button", {
+        onClick: function () {
+          loadTemplate(tpl.id);
+        },
+        style: {
+          border: "none",
+          background: "#FFE2D2",
+          color: "#E5703B",
+          borderRadius: 10,
+          padding: "6px 10px",
+          fontWeight: 700,
+          fontSize: 12,
+          cursor: "pointer",
+          fontFamily: "'Zen Maru Gothic',sans-serif",
+          flexShrink: 0
+        }
+      }, "読込"), /*#__PURE__*/React.createElement("button", {
+        onClick: function () {
+          deleteTemplate(tpl.id);
+        },
+        style: {
+          border: "none",
+          background: "transparent",
+          color: "#D98B7A",
+          fontSize: 16,
+          cursor: "pointer",
+          padding: "4px 6px",
+          flexShrink: 0
+        }
+      }, "🗑"));
+    }))), setupTotalMinutes > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        textAlign: "center",
+        fontSize: 13,
+        opacity: .75,
+        marginBottom: 14,
+        lineHeight: 1.6
+      }
+    }, "🕐 今から始めると ", /*#__PURE__*/React.createElement("strong", {
+      style: {
+        color: "#E5703B",
+        fontFamily: "'M PLUS Rounded 1c',sans-serif"
+      }
+    }, clock(setupPredictedFinish)), " ごろ 終わる予定（合計 " + setupTotalMinutes + "分）"), /*#__PURE__*/React.createElement("div", {
       style: {
         background: "#fff",
         borderRadius: 22,
@@ -951,8 +1220,16 @@ function MorningRoutine() {
         gap: 12
       }
     }, tasks.map(function (t, i) {
+      setupCumMinutes += t.minutes || 0;
+      var rowEndTime = new Date(now.getTime() + setupCumMinutes * 60000);
       return /*#__PURE__*/React.createElement("div", {
         key: t.id,
+        style: {
+          display: "flex",
+          flexDirection: "column",
+          gap: 4
+        }
+      }, /*#__PURE__*/React.createElement("div", {
         style: {
           background: "#fff",
           borderRadius: 18,
@@ -1051,12 +1328,24 @@ function MorningRoutine() {
         style: Object.assign({}, iconBtn(false), {
           color: "#D98B7A"
         })
-      }, "🗑"));
-    })), /*#__PURE__*/React.createElement("button", {
+      }, "🗑")), t.minutes > 0 ? /*#__PURE__*/React.createElement("div", {
+        style: {
+          fontSize: 11,
+          opacity: .5,
+          textAlign: "right",
+          paddingRight: 4
+        }
+      }, "→ " + clock(rowEndTime) + " ごろ おわる予定") : null);
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 8,
+        marginTop: 14
+      }
+    }, /*#__PURE__*/React.createElement("button", {
       onClick: addTask,
       style: {
-        marginTop: 14,
-        width: "100%",
+        flex: 1,
         padding: "12px",
         borderRadius: 16,
         border: "2px dashed #FFC9AE",
@@ -1071,7 +1360,21 @@ function MorningRoutine() {
         justifyContent: "center",
         gap: 6
       }
-    }, "＋ タスクを ついか"), !srSupported && /*#__PURE__*/React.createElement("p", {
+    }, "＋ タスクを ついか"), tasks.length > 0 && /*#__PURE__*/React.createElement("button", {
+      onClick: clearAllTasks,
+      style: {
+        padding: "12px 16px",
+        borderRadius: 16,
+        border: "2px solid #F0DBCA",
+        background: "transparent",
+        color: "#A8856E",
+        fontWeight: 700,
+        fontSize: 13,
+        cursor: "pointer",
+        fontFamily: "'Zen Maru Gothic',sans-serif",
+        whiteSpace: "nowrap"
+      }
+    }, "🗑 全部けす")), !srSupported && /*#__PURE__*/React.createElement("p", {
       style: {
         fontSize: 12,
         color: "#C77",
@@ -1439,10 +1742,16 @@ function MorningRoutine() {
       opacity: .5,
       marginTop: 6
     }
-  }, currentIndex + 1 < tasks.length ? "つぎ：" + tasks[currentIndex + 1].name : "さいごの タスク")))), currentIndex > 0 && /*#__PURE__*/React.createElement("button", {
+  }, currentIndex + 1 < tasks.length ? "つぎ：" + tasks[currentIndex + 1].name : "さいごの タスク")))), (currentIndex > 0 || currentIndex + 1 < tasks.length) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginTop: 8
+    }
+  }, currentIndex > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: goBack,
     style: {
-      width: "100%",
+      flex: 1,
       padding: "11px",
       borderRadius: 16,
       border: "2px solid #F0DBCA",
@@ -1452,13 +1761,30 @@ function MorningRoutine() {
       fontSize: 14,
       cursor: "pointer",
       fontFamily: "'Zen Maru Gothic',sans-serif",
-      marginTop: 8,
       display: "flex",
       alignItems: "center",
       justifyContent: "center",
       gap: 6
     }
-  }, "↩ ひとつ前に もどる"), /*#__PURE__*/React.createElement("button", {
+  }, "↩ もどる"), currentIndex + 1 < tasks.length && /*#__PURE__*/React.createElement("button", {
+    onClick: postponeCurrentTask,
+    style: {
+      flex: 1,
+      padding: "11px",
+      borderRadius: 16,
+      border: "2px solid #F0DBCA",
+      background: "#FFFAF5",
+      color: "#A8856E",
+      fontWeight: 700,
+      fontSize: 14,
+      cursor: "pointer",
+      fontFamily: "'Zen Maru Gothic',sans-serif",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6
+    }
+  }, "⏭ あとまわし")), /*#__PURE__*/React.createElement("button", {
     onClick: completeTask,
     style: {
       width: "100%",
@@ -1478,7 +1804,82 @@ function MorningRoutine() {
       justifyContent: "center",
       gap: 10
     }
-  }, "✓ 完了！つぎへ"), /*#__PURE__*/React.createElement("div", {
+  }, "✓ 完了！つぎへ"), currentIndex + 1 < tasks.length && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 12,
+      background: "#fff",
+      borderRadius: 18,
+      padding: "10px 12px",
+      boxShadow: "0 4px 16px rgba(214,140,90,.10)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      opacity: .55,
+      marginBottom: 8
+    }
+  }, "📋 のこりの タスク（" + (tasks.length - currentIndex - 1) + "個）"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, tasks.slice(currentIndex + 1).map(function (t, k) {
+    var i = currentIndex + 1 + k;
+    return /*#__PURE__*/React.createElement("div", {
+      key: t.id,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        background: "#FFF8F2",
+        borderRadius: 12,
+        padding: "6px 8px"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 1
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: function () {
+        reorderUpcoming(i, -1);
+      },
+      disabled: i === currentIndex + 1,
+      style: Object.assign({}, iconBtn(i === currentIndex + 1), {
+        width: 22,
+        height: 18,
+        fontSize: 11
+      })
+    }, "↑"), /*#__PURE__*/React.createElement("button", {
+      onClick: function () {
+        reorderUpcoming(i, 1);
+      },
+      disabled: i === tasks.length - 1,
+      style: Object.assign({}, iconBtn(i === tasks.length - 1), {
+        width: 22,
+        height: 18,
+        fontSize: 11
+      })
+    }, "↓")), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 13,
+        flex: 1,
+        minWidth: 0,
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis"
+      }
+    }, t.name), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        opacity: .55,
+        flexShrink: 0
+      }
+    }, t.minutes + "分"));
+  }))), /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 14,
       background: "#fff",
