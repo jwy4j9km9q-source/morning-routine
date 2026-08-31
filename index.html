@@ -11,7 +11,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;500;700&family=M+PLUS+Rounded+1c:wght@400;700;800&display=swap" rel="stylesheet">
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+input,textarea{-webkit-user-select:text;user-select:text}
 body{background:#FFF5EA;overscroll-behavior:none;-webkit-tap-highlight-color:transparent;font-family:'Zen Maru Gothic','M PLUS Rounded 1c','Hiragino Maru Gothic ProN','Yu Gothic',sans-serif}
 @keyframes pulse-mic{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.12);opacity:.7}}
 @keyframes blink-over{0%,100%{opacity:1}50%{opacity:.45}}
@@ -337,6 +338,7 @@ const {
 } = ReactDOM;
 const STORAGE_KEY = "morning-routine-config";
 const TEMPLATES_KEY = "morning-routine-templates";
+const QUICKTASKS_KEY = "morning-routine-quicktasks";
 const DEFAULT_TASKS = [{
   id: 1,
   name: "歯を磨く",
@@ -357,7 +359,11 @@ const DEFAULT_TASKS = [{
   id: 5,
   name: "お薬を飲む",
   minutes: 2
-}];
+}].map(function (t) {
+  return Object.assign({}, t, {
+    minutesInput: String(t.minutes)
+  });
+});
 function fmt(totalSec) {
   const sign = totalSec < 0 ? "+" : "";
   const s = Math.abs(Math.round(totalSec));
@@ -406,6 +412,18 @@ function MorningRoutine() {
   const [micNote, setMicNote] = useState("");
   const [textInput, setTextInput] = useState("");
   const [templates, setTemplates] = useState([]);
+  const [quickTasks, setQuickTasks] = useState([]);
+  const [expandedTemplateId, setExpandedTemplateId] = useState(null);
+  const [toast, setToast] = useState(null);
+  const toastTimerRef = useRef(null);
+  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
+  const [templateNameDraft, setTemplateNameDraft] = useState("");
+  const [confirmDialog, setConfirmDialog] = useState(null);
+  const [focusTaskId, setFocusTaskId] = useState(null);
+  const [dragTaskId, setDragTaskId] = useState(null);
+  const rowRefs = useRef({});
+  const dragStateRef = useRef(null);
+  const nameInputRefs = useRef({});
   const wakeLockRef = useRef(null);
   const recognitionRef = useRef(null);
   const micOnRef = useRef(false);
@@ -460,9 +478,29 @@ function MorningRoutine() {
       localStorage.setItem(TEMPLATES_KEY, JSON.stringify(list));
     } catch (e) {}
   };
+  var showToast = function (msg, ms) {
+    setToast(msg);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(function () {
+      setToast(null);
+    }, ms || 1700);
+  };
+  var askConfirm = function (message, onYes) {
+    setConfirmDialog({
+      message: message,
+      onYes: onYes
+    });
+  };
   var saveCurrentAsTemplate = function () {
-    if (!tasks.length) return;
-    var name = window.prompt("テンプレートの名前をつけてね", "");
+    if (!tasks.length) {
+      showToast("タスクが まだ ないよ");
+      return;
+    }
+    setTemplateNameDraft("");
+    setSaveTemplateOpen(true);
+  };
+  var confirmSaveTemplate = function () {
+    var name = templateNameDraft.trim();
     if (!name) return;
     var tpl = {
       id: Date.now(),
@@ -479,40 +517,159 @@ function MorningRoutine() {
       saveTemplatesToStorage(next);
       return next;
     });
+    setSaveTemplateOpen(false);
+    showToast("📋「" + name + "」を保存したよ");
   };
   var loadTemplate = function (id) {
     var tpl = templates.find(function (t) {
       return t.id === id;
     });
     if (!tpl) return;
-    if (tasks.length && !window.confirm("いまの タスクを けして「" + tpl.name + "」を よみこむよ。いい？")) return;
-    setTasks(tpl.tasks.map(function (t, i) {
-      return {
-        id: Date.now() + i,
-        name: t.name,
-        minutes: t.minutes
-      };
-    }));
+    var doLoad = function () {
+      setTasks(tpl.tasks.map(function (t, i) {
+        return {
+          id: Date.now() + i,
+          name: t.name,
+          minutes: t.minutes,
+          minutesInput: String(t.minutes)
+        };
+      }));
+      showToast("📋「" + tpl.name + "」を読み込んだよ");
+    };
+    if (tasks.length) {
+      askConfirm("いまの タスクを けして「" + tpl.name + "」を よみこむよ。いい？", doLoad);
+    } else {
+      doLoad();
+    }
   };
   var deleteTemplate = function (id) {
     var tpl = templates.find(function (t) {
       return t.id === id;
     });
     if (!tpl) return;
-    if (!window.confirm("「" + tpl.name + "」を さくじょ するよ。いい？")) return;
-    setTemplates(function (prev) {
-      var next = prev.filter(function (t) {
-        return t.id !== id;
+    askConfirm("「" + tpl.name + "」を さくじょ するよ。いい？", function () {
+      setTemplates(function (prev) {
+        var next = prev.filter(function (t) {
+          return t.id !== id;
+        });
+        saveTemplatesToStorage(next);
+        return next;
       });
-      saveTemplatesToStorage(next);
-      return next;
+      showToast("削除したよ");
     });
   };
   var clearAllTasks = function () {
     if (!tasks.length) return;
-    if (!window.confirm("ぜんぶの タスクを けすよ。いい？")) return;
-    setTasks([]);
+    askConfirm("ぜんぶの タスクを けすよ。いい？", function () {
+      setTasks([]);
+    });
   };
+
+  // 「よく使うタスク」の読み込み・保存
+  useEffect(function () {
+    try {
+      var saved = localStorage.getItem(QUICKTASKS_KEY);
+      if (saved) {
+        var list = JSON.parse(saved);
+        if (Array.isArray(list)) setQuickTasks(list);
+      }
+    } catch (e) {}
+  }, []);
+  var saveQuickTasksToStorage = function (list) {
+    try {
+      localStorage.setItem(QUICKTASKS_KEY, JSON.stringify(list));
+    } catch (e) {}
+  };
+  var addQuickTaskFromRow = function (t) {
+    if (!t.name) {
+      showToast("名前を いれてから ⭐ を おしてね");
+      return;
+    }
+    var isDup = quickTasks.some(function (q) {
+      return q.name === t.name && q.minutes === t.minutes;
+    });
+    if (isDup) {
+      showToast("もう 保存ずみだよ");
+      return;
+    }
+    var next = [...quickTasks, {
+      id: Date.now(),
+      name: t.name,
+      minutes: t.minutes
+    }];
+    setQuickTasks(next);
+    saveQuickTasksToStorage(next);
+    showToast("⭐「" + t.name + "」を保存したよ");
+  };
+  var addTaskFromQuick = function (q) {
+    var newId = Date.now();
+    setTasks(function (p) {
+      return [...p, {
+        id: newId,
+        name: q.name,
+        minutes: q.minutes,
+        minutesInput: String(q.minutes)
+      }];
+    });
+  };
+  var removeQuickTask = function (id) {
+    setQuickTasks(function (prev) {
+      var next = prev.filter(function (q) {
+        return q.id !== id;
+      });
+      saveQuickTasksToStorage(next);
+      return next;
+    });
+  };
+
+  // タスクの並べ替え（長押しドラッグ）
+  var handleDragPointerMove = useCallback(function (e) {
+    var st = dragStateRef.current;
+    if (!st) return;
+    var y = e.clientY;
+    var hoverId = null;
+    var ids = Object.keys(rowRefs.current);
+    for (var k = 0; k < ids.length; k++) {
+      var elId = ids[k];
+      var el = rowRefs.current[elId];
+      if (!el) continue;
+      var rect = el.getBoundingClientRect();
+      if (y >= rect.top && y <= rect.bottom) {
+        hoverId = elId;
+        break;
+      }
+    }
+    if (hoverId !== null && String(hoverId) !== String(st.id)) {
+      setTasks(function (prev) {
+        var fromIdx = prev.findIndex(function (t) {
+          return String(t.id) === String(st.id);
+        });
+        var toIdx = prev.findIndex(function (t) {
+          return String(t.id) === String(hoverId);
+        });
+        if (fromIdx === -1 || toIdx === -1) return prev;
+        var arr = [...prev];
+        var moved = arr.splice(fromIdx, 1)[0];
+        arr.splice(toIdx, 0, moved);
+        return arr;
+      });
+    }
+  }, []);
+  var handleDragPointerUp = useCallback(function () {
+    dragStateRef.current = null;
+    setDragTaskId(null);
+    document.removeEventListener("pointermove", handleDragPointerMove);
+    document.removeEventListener("pointerup", handleDragPointerUp);
+  }, [handleDragPointerMove]);
+  var handleDragPointerDown = useCallback(function (e, id) {
+    e.preventDefault();
+    dragStateRef.current = {
+      id: id
+    };
+    setDragTaskId(id);
+    document.addEventListener("pointermove", handleDragPointerMove);
+    document.addEventListener("pointerup", handleDragPointerUp);
+  }, [handleDragPointerMove, handleDragPointerUp]);
   var saveConfig = useCallback(function (t, tt, te) {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -854,6 +1011,16 @@ function MorningRoutine() {
     cmdRef.current = handleCommand;
   }, [handleCommand]);
 
+  // 新しいタスクの名前欄に自動でフォーカス
+  useEffect(function () {
+    if (focusTaskId == null) return;
+    var el = nameInputRefs.current[focusTaskId];
+    if (el) {
+      el.focus();
+    }
+    setFocusTaskId(null);
+  }, [focusTaskId, tasks]);
+
   // セットアップ画面の「いま」を ときどき更新（予想終了時刻の表示用）
   useEffect(function () {
     if (screen !== "setup") return;
@@ -932,13 +1099,16 @@ function MorningRoutine() {
     setAiReply("");
   }, []);
   var addTask = function () {
+    var newId = Date.now();
     setTasks(function (p) {
       return [...p, {
-        id: Date.now(),
-        name: "あたらしいタスク",
-        minutes: 5
+        id: newId,
+        name: "",
+        minutes: 5,
+        minutesInput: "5"
       }];
     });
+    setFocusTaskId(newId);
   };
   var removeTask = function (id) {
     setTasks(function (p) {
@@ -953,6 +1123,33 @@ function MorningRoutine() {
         return t.id === id ? Object.assign({}, t, {
           [field]: val
         }) : t;
+      });
+    });
+  };
+  var updateTaskMinutesInput = function (id, raw) {
+    var digits = raw.replace(/[^0-9]/g, "");
+    setTasks(function (p) {
+      return p.map(function (t) {
+        if (t.id !== id) return t;
+        return Object.assign({}, t, {
+          minutesInput: digits,
+          minutes: digits === "" ? t.minutes : parseInt(digits, 10)
+        });
+      });
+    });
+  };
+  var blurTaskMinutes = function (id) {
+    setTasks(function (p) {
+      return p.map(function (t) {
+        if (t.id !== id) return t;
+        if (t.minutesInput === "" || parseInt(t.minutesInput, 10) !== t.minutes) {
+          var m = t.minutesInput === "" ? 0 : parseInt(t.minutesInput, 10);
+          return Object.assign({}, t, {
+            minutes: m,
+            minutesInput: String(m)
+          });
+        }
+        return t;
       });
     });
   };
@@ -998,6 +1195,176 @@ function MorningRoutine() {
   }, 0);
   var setupPredictedFinish = new Date(now.getTime() + setupTotalMinutes * 60000);
   var setupCumMinutes = 0;
+
+  var toastEl = toast ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      left: "50%",
+      bottom: 28,
+      transform: "translateX(-50%)",
+      background: "#4A3B32",
+      color: "#fff",
+      padding: "11px 20px",
+      borderRadius: 22,
+      fontSize: 14,
+      fontWeight: 700,
+      boxShadow: "0 6px 20px rgba(0,0,0,.25)",
+      zIndex: 999,
+      fontFamily: "'Zen Maru Gothic',sans-serif",
+      whiteSpace: "nowrap",
+      animation: "float-up .25s ease both"
+    }
+  }, toast) : null;
+
+  var saveTemplateModalEl = saveTemplateOpen ? /*#__PURE__*/React.createElement("div", {
+    onClick: function () {
+      setSaveTemplateOpen(false);
+    },
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(74,59,50,.35)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      zIndex: 998,
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: function (e) {
+      e.stopPropagation();
+    },
+    style: {
+      background: "#fff",
+      borderRadius: 20,
+      padding: 20,
+      width: "100%",
+      maxWidth: 320,
+      boxShadow: "0 10px 30px rgba(0,0,0,.2)"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 700,
+      fontSize: 15,
+      marginBottom: 12
+    }
+  }, "テンプレートの名前"), /*#__PURE__*/React.createElement("input", {
+    value: templateNameDraft,
+    autoFocus: true,
+    onChange: function (e) {
+      setTemplateNameDraft(e.target.value);
+    },
+    onKeyDown: function (e) {
+      if (e.key === "Enter") confirmSaveTemplate();
+    },
+    placeholder: "例：平日の朝ルーティン",
+    style: {
+      width: "100%",
+      border: "2px solid #FFD9C2",
+      borderRadius: 12,
+      padding: "10px 12px",
+      fontSize: 15,
+      fontFamily: "'Zen Maru Gothic',sans-serif",
+      marginBottom: 14
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: function () {
+      setSaveTemplateOpen(false);
+    },
+    style: {
+      flex: 1,
+      padding: "10px",
+      borderRadius: 14,
+      border: "2px solid #F0DBCA",
+      background: "transparent",
+      color: "#A8856E",
+      fontWeight: 700,
+      fontFamily: "'Zen Maru Gothic',sans-serif"
+    }
+  }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
+    onClick: confirmSaveTemplate,
+    disabled: !templateNameDraft.trim(),
+    style: {
+      flex: 1,
+      padding: "10px",
+      borderRadius: 14,
+      border: "none",
+      background: templateNameDraft.trim() ? "#E5703B" : "#F0DBCA",
+      color: "#fff",
+      fontWeight: 700,
+      fontFamily: "'Zen Maru Gothic',sans-serif"
+    }
+  }, "保存")))) : null;
+
+  var confirmModalEl = confirmDialog ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(74,59,50,.35)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      zIndex: 998,
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#fff",
+      borderRadius: 20,
+      padding: 20,
+      width: "100%",
+      maxWidth: 320,
+      boxShadow: "0 10px 30px rgba(0,0,0,.2)",
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 600,
+      marginBottom: 16,
+      lineHeight: 1.6
+    }
+  }, confirmDialog.message), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: function () {
+      setConfirmDialog(null);
+    },
+    style: {
+      flex: 1,
+      padding: "10px",
+      borderRadius: 14,
+      border: "2px solid #F0DBCA",
+      background: "transparent",
+      color: "#A8856E",
+      fontWeight: 700,
+      fontFamily: "'Zen Maru Gothic',sans-serif"
+    }
+  }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
+    onClick: function () {
+      var fn = confirmDialog.onYes;
+      setConfirmDialog(null);
+      if (fn) fn();
+    },
+    style: {
+      flex: 1,
+      padding: "10px",
+      borderRadius: 14,
+      border: "none",
+      background: "#E5703B",
+      color: "#fff",
+      fontWeight: 700,
+      fontFamily: "'Zen Maru Gothic',sans-serif"
+    }
+  }, "はい")))) : null;
 
   // ====== セットアップ画面 ======
   if (screen === "setup") {
@@ -1081,8 +1448,10 @@ function MorningRoutine() {
         gap: 8
       }
     }, templates.map(function (tpl) {
-      return /*#__PURE__*/React.createElement("div", {
-        key: tpl.id,
+      var isOpen = expandedTemplateId === tpl.id;
+      return /*#__PURE__*/React.createElement(React.Fragment, {
+        key: tpl.id
+      }, /*#__PURE__*/React.createElement("div", {
         style: {
           display: "flex",
           alignItems: "center",
@@ -1092,8 +1461,27 @@ function MorningRoutine() {
           padding: "8px 10px"
         }
       }, /*#__PURE__*/React.createElement("div", {
+        onClick: function () {
+          setExpandedTemplateId(isOpen ? null : tpl.id);
+        },
         style: {
           flex: 1,
+          minWidth: 0,
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          gap: 6
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          fontSize: 11,
+          opacity: .5,
+          transform: isOpen ? "rotate(90deg)" : "none",
+          transition: "transform .15s ease",
+          flexShrink: 0
+        }
+      }, "▶"), /*#__PURE__*/React.createElement("div", {
+        style: {
           minWidth: 0
         }
       }, /*#__PURE__*/React.createElement("div", {
@@ -1111,7 +1499,7 @@ function MorningRoutine() {
         }
       }, tpl.tasks.length + "個・合計" + tpl.tasks.reduce(function (a, t) {
         return a + t.minutes;
-      }, 0) + "分")), /*#__PURE__*/React.createElement("button", {
+      }, 0) + "分"))), /*#__PURE__*/React.createElement("button", {
         onClick: function () {
           loadTemplate(tpl.id);
         },
@@ -1140,7 +1528,98 @@ function MorningRoutine() {
           padding: "4px 6px",
           flexShrink: 0
         }
-      }, "🗑"));
+      }, "🗑")), isOpen ? /*#__PURE__*/React.createElement("div", {
+        style: {
+          background: "#FFFAF5",
+          border: "1px dashed #F0DBCA",
+          borderRadius: 12,
+          padding: "8px 10px",
+          margin: "2px 0 4px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 4
+        }
+      }, tpl.tasks.map(function (tt, ti) {
+        return /*#__PURE__*/React.createElement("div", {
+          key: ti,
+          style: {
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 10,
+            fontSize: 13
+          }
+        }, /*#__PURE__*/React.createElement("span", {
+          style: {
+            minWidth: 0,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis"
+          }
+        }, ti + 1, ". ", tt.name), /*#__PURE__*/React.createElement("span", {
+          style: {
+            opacity: .6,
+            flexShrink: 0
+          }
+        }, tt.minutes, "分"));
+      })) : null);
+    }))), quickTasks.length > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: "#fff",
+        borderRadius: 22,
+        padding: "14px 16px",
+        marginBottom: 14,
+        boxShadow: "0 6px 22px rgba(214,140,90,.14)"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontWeight: 700,
+        fontSize: 15,
+        marginBottom: 10
+      }
+    }, "⭐ よく使うタスク"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 8
+      }
+    }, quickTasks.map(function (q) {
+      return /*#__PURE__*/React.createElement("div", {
+        key: q.id,
+        style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          background: "#FFF3E6",
+          borderRadius: 20,
+          padding: "6px 6px 6px 12px"
+        }
+      }, /*#__PURE__*/React.createElement("button", {
+        onClick: function () {
+          addTaskFromQuick(q);
+        },
+        style: {
+          border: "none",
+          background: "transparent",
+          color: "#E5703B",
+          fontWeight: 700,
+          fontSize: 13,
+          cursor: "pointer",
+          fontFamily: "'Zen Maru Gothic',sans-serif",
+          padding: 0
+        }
+      }, "＋ " + q.name + "（" + q.minutes + "分）"), /*#__PURE__*/React.createElement("button", {
+        onClick: function () {
+          removeQuickTask(q.id);
+        },
+        style: {
+          border: "none",
+          background: "transparent",
+          color: "#C9AF9C",
+          fontSize: 13,
+          cursor: "pointer",
+          padding: "2px 4px"
+        }
+      }, "✕"));
     }))), setupTotalMinutes > 0 && /*#__PURE__*/React.createElement("div", {
       style: {
         textAlign: "center",
@@ -1224,43 +1703,54 @@ function MorningRoutine() {
       var rowEndTime = new Date(now.getTime() + setupCumMinutes * 60000);
       return /*#__PURE__*/React.createElement("div", {
         key: t.id,
+        ref: function (el) {
+          if (el) rowRefs.current[t.id] = el;else delete rowRefs.current[t.id];
+        },
         style: {
           display: "flex",
           flexDirection: "column",
-          gap: 4
+          gap: 4,
+          opacity: dragTaskId === t.id ? 0.55 : 1,
+          transition: "opacity .15s ease"
         }
       }, /*#__PURE__*/React.createElement("div", {
         style: {
           background: "#fff",
           borderRadius: 18,
-          padding: "12px 12px 12px 14px",
-          boxShadow: "0 4px 14px rgba(214,140,90,.10)",
+          padding: "12px 12px 12px 10px",
+          boxShadow: dragTaskId === t.id ? "0 8px 20px rgba(214,140,90,.28)" : "0 4px 14px rgba(214,140,90,.10)",
           display: "flex",
           alignItems: "center",
           gap: 8
         }
-      }, /*#__PURE__*/React.createElement("div", {
-        style: {
-          display: "flex",
-          flexDirection: "column",
-          gap: 2
-        }
       }, /*#__PURE__*/React.createElement("button", {
-        onClick: function () {
-          moveTask(i, -1);
+        onPointerDown: function (e) {
+          handleDragPointerDown(e, t.id);
         },
-        disabled: i === 0,
-        style: iconBtn(i === 0)
-      }, "↑"), /*#__PURE__*/React.createElement("button", {
-        onClick: function () {
-          moveTask(i, 1);
+        onDragStart: function (e) {
+          e.preventDefault();
         },
-        disabled: i === tasks.length - 1,
-        style: iconBtn(i === tasks.length - 1)
-      }, "↓")), /*#__PURE__*/React.createElement("div", {
         style: {
-          width: 26,
-          height: 26,
+          width: 34,
+          height: 40,
+          border: "none",
+          background: "transparent",
+          color: "#C9AF9C",
+          fontSize: 20,
+          cursor: "grab",
+          touchAction: "none",
+          WebkitUserSelect: "none",
+          userSelect: "none",
+          WebkitTouchCallout: "none",
+          flexShrink: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center"
+        }
+      }, "⠿"), /*#__PURE__*/React.createElement("div", {
+        style: {
+          width: 24,
+          height: 24,
           borderRadius: "50%",
           background: "#FFEEE2",
           color: "#E5703B",
@@ -1268,12 +1758,19 @@ function MorningRoutine() {
           alignItems: "center",
           justifyContent: "center",
           fontWeight: 800,
-          fontSize: 13,
+          fontSize: 12,
           fontFamily: "'M PLUS Rounded 1c',sans-serif",
           flexShrink: 0
         }
       }, i + 1), /*#__PURE__*/React.createElement("input", {
         value: t.name,
+        placeholder: "あたらしいタスク",
+        ref: function (el) {
+          if (el) nameInputRefs.current[t.id] = el;else delete nameInputRefs.current[t.id];
+        },
+        onFocus: function (e) {
+          e.target.select();
+        },
         onChange: function (e) {
           updateTask(t.id, "name", e.target.value);
         },
@@ -1298,11 +1795,18 @@ function MorningRoutine() {
           flexShrink: 0
         }
       }, /*#__PURE__*/React.createElement("input", {
-        type: "number",
-        min: 0,
-        value: t.minutes,
+        type: "text",
+        inputMode: "numeric",
+        pattern: "[0-9]*",
+        value: t.minutesInput !== undefined ? t.minutesInput : String(t.minutes),
+        onFocus: function (e) {
+          e.target.select();
+        },
         onChange: function (e) {
-          updateTask(t.id, "minutes", Math.max(0, parseInt(e.target.value) || 0));
+          updateTaskMinutesInput(t.id, e.target.value);
+        },
+        onBlur: function () {
+          blurTaskMinutes(t.id);
         },
         style: {
           width: 46,
@@ -1322,6 +1826,14 @@ function MorningRoutine() {
           opacity: .6
         }
       }, "分")), /*#__PURE__*/React.createElement("button", {
+        onClick: function () {
+          addQuickTaskFromRow(t);
+        },
+        title: "「よく使うタスク」に保存",
+        style: Object.assign({}, iconBtn(false), {
+          color: "#E5A13B"
+        })
+      }, "⭐"), /*#__PURE__*/React.createElement("button", {
         onClick: function () {
           removeTask(t.id);
         },
@@ -1411,7 +1923,7 @@ function MorningRoutine() {
         marginTop: 14,
         lineHeight: 1.7
       }
-    }, "※ 画面を つけっぱなしに してね", /*#__PURE__*/React.createElement("br", null), "「完了」「もどる」など 声でも すすめられるよ")));
+    }, "※ 画面を つけっぱなしに してね", /*#__PURE__*/React.createElement("br", null), "「完了」「もどる」など 声でも すすめられるよ")), toastEl, saveTemplateModalEl, confirmModalEl);
   }
 
   // ====== 完了画面 ======
